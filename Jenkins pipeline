@@ -1,0 +1,71 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "dockerhub-username/your-app"
+        IMAGE_TAG = "latest"
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git ''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t $IMAGE_NAME:$IMAGE_TAG .'
+            }
+        }
+
+        stage('Trivy Scan (Container Security)') {
+            steps {
+                sh '''
+                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy image --exit-code 1 --severity CRITICAL $IMAGE_NAME:$IMAGE_TAG
+                '''
+            }
+        }
+
+        stage('OWASP Dependency-Check (Dependency Security)') {
+            steps {
+                sh '''
+                mkdir -p dependency-check
+                docker run --rm -v $(pwd)/dependency-check:/report \
+                owasp/dependency-check --scan /workspace --format HTML --out /report
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'dependency-check/report/*', fingerprint: true
+                }
+            }
+        }
+
+        stage('Push Docker Image to Docker Hub') {
+            when {
+                expression {
+                    return sh(script: "docker images | grep $IMAGE_NAME", returnStatus: true) == 0
+                }
+            }
+            steps {
+                withDockerRegistry([credentialsId: 'docker-hub-credentials', url: '']) {
+                    sh 'docker push $IMAGE_NAME:$IMAGE_TAG'
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh 'kubectl apply -f k8s-deployment.yaml'
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Build or Security Scan Failed!"
+        }
+    }
+}
